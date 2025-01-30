@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Tuple, List
 import os
 from abc import abstractmethod
+import urllib
 from tqdm import tqdm
 import xarray as xr
 import pandas as pd
@@ -41,10 +42,13 @@ class MetProduct(Product):
         return [self._get_url_info(date) for date in self.get_dates(start_date, end_date)]
 
     def import_data(self, ts: TimeSeries, save_csv=True, save_nc=False, use_cache=False):
-        tempfiles, lon_near, lat_near = self.download_temporary_files(ts, use_cache)
-        return self._combine_temporary_files(ts, save_csv, save_nc, use_cache, tempfiles, lon_near, lat_near, height=ts.height, depth=ts.depth)
+        tempfiles, lon_near, lat_near, start_time, end_time = self.download_temporary_files(ts, use_cache)
+        if len(tempfiles) == 0:
+            print('No valid data found for these dates.')
+            return
+        return self._combine_temporary_files(ts, save_csv, save_nc, use_cache, tempfiles, lon_near, lat_near, start_time, end_time, height=ts.height, depth=ts.depth)
 
-    def download_temporary_files(self, ts: TimeSeries, use_cache: bool = False) -> Tuple[List[str], float, float]:
+    def download_temporary_files(self, ts: TimeSeries, use_cache: bool = False) -> Tuple[List[str], float, float, str, str]:
         if ts.variable == [] or ts.variable is None:
             ts.variable = self.get_default_variables()
         start_time = ts.start_time
@@ -55,17 +59,38 @@ class MetProduct(Product):
         dates = self.get_dates(start_time, end_time)
 
         tempfiles = aux_funcs.get_tempfiles(self.name, lon, lat, dates)
+        tempfiles_valid = []
         selection = None
         lon_near = None
         lat_near = None
 
+        print('Reading catalog...', end='', flush=True)
+        url0 = self._get_url_info(dates[0])
+        catalog_url = f"{os.path.dirname(url0).replace('dodsC', 'catalog')}/catalog.html"
+        with urllib.request.urlopen(catalog_url) as response:
+            catalog = response.read().decode('utf-8')
+        print('done.')
+
         # extract point and create temp files
+        first = True
         for i in tqdm(range(len(dates))):
             url = self._get_url_info(dates[i])
 
-            if i == 0:
+            if not os.path.basename(url) in catalog:
+                if first:  # skipping start-data
+                    tqdm.write(f'{url} not found. Skipping this date.')
+                    continue
+                else:
+                    tqdm.write(f'{url} not found. Skipping this and all future dates.')
+                    break
+
+            tempfiles_valid.append(tempfiles[i])
+
+            if first:
                 selection, lon_near, lat_near = self._get_near_coord(url, lon, lat)
                 tqdm.write(f"Nearest point to lat.={lat:.3f},lon.={lon:.3f} was found at lat.={lat_near:.3f},lon.={lon_near:.3f}")
+                start_time = dates[i]
+                first = False
 
             if use_cache and os.path.exists(tempfiles[i]):
                 tqdm.write(f"Found cached file {tempfiles[i]}. Using this instead")
@@ -78,10 +103,12 @@ class MetProduct(Product):
                     dataset = dataset.sel(selection).squeeze(drop=True)
                     dataset = self._alter_temporary_dataset_if_needed(dataset)
                     dataset.to_netcdf(tempfiles[i])
+            end_time = dates[i]
 
         ts.lat_data = lat_near
         ts.lon_data = lon_near
-        return tempfiles, lon_near, lat_near
+
+        return tempfiles_valid, lon_near, lat_near, start_time, end_time
 
     def _alter_temporary_dataset_if_needed(self, dataset: xr.Dataset):
         # Override this method in subclasses to alter the dataset before saving it to a temporary file
@@ -89,14 +116,14 @@ class MetProduct(Product):
         return dataset
 
     def _combine_temporary_files(
-        self, ts: TimeSeries, save_csv, save_nc, use_cache, tempfiles, lon_near, lat_near, **flatten_dims
+        self, ts: TimeSeries, save_csv, save_nc, use_cache, tempfiles, lon_near, lat_near, start_time, end_time, **flatten_dims
     ):
         self._remove_if_datafile_exists(ts.datafile)
         # merge temp files
         with xr.open_mfdataset(tempfiles) as ds:
             if save_nc:
                 # Save the unaltered structure
-                ds = ds.sel({"time": slice(ts.start_time, ts.end_time)})
+                ds = ds.sel({"time": slice(start_time, end_time)})
                 ds.to_netcdf(ts.datafile.replace(".csv", ".nc"))
 
             df = self.create_dataframe(
@@ -104,8 +131,8 @@ class MetProduct(Product):
                 lon_near=lon_near,
                 lat_near=lat_near,
                 outfile=ts.datafile,
-                start_time=ts.start_time,
-                end_time=ts.end_time,
+                start_time=start_time,
+                end_time=end_time,
                 save_csv=save_csv,
                 **flatten_dims,
             )

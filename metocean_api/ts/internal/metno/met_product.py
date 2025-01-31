@@ -81,8 +81,9 @@ class MetProduct(Product):
                     tqdm.write(f'{url} not found. Skipping this date.')
                     continue
                 else:
-                    tqdm.write(f'{url} not found. Skipping this and all future dates.')
-                    break
+                    raise NotImplementedError('Not implemented.')
+                    # tqdm.write(f'{url} not found. Skipping this and all future dates.')
+                    # break
 
             tempfiles_valid.append(tempfiles[i])
 
@@ -103,12 +104,11 @@ class MetProduct(Product):
                     dataset = dataset.sel(selection).squeeze(drop=True)
                     dataset = self._alter_temporary_dataset_if_needed(dataset)
                     dataset.to_netcdf(tempfiles[i])
-            end_time = dates[i]
 
         ts.lat_data = lat_near
         ts.lon_data = lon_near
 
-        return tempfiles_valid, lon_near, lat_near, start_time, end_time
+        return tempfiles_valid, lon_near, lat_near, start_time, ts.end_time
 
     def _alter_temporary_dataset_if_needed(self, dataset: xr.Dataset):
         # Override this method in subclasses to alter the dataset before saving it to a temporary file
